@@ -1,0 +1,97 @@
+#lammps script to run PKA
+
+clear
+units metal
+dimension 3 
+boundary p p p 
+atom_style atomic
+
+variable        direction string 135
+
+read_data       final-equil.data #initial.data
+read_dump       translated-id81783.dump 0 x y z  #such that the pka atom is localed at a point that make most use of the configuration
+
+group           Ni type 1
+group           Co type 2
+group           Cr type 3
+
+mass            1 58.693
+mass            2 58.933
+mass            3 51.996
+
+variable        epka equal 40 #KeV, kinetic energy of the pka
+group           pka id 81783 #94583 
+#-----pka in [135] direction-----unit angstrom/ps------
+if "${epka}==1" then &
+"velocity        pka set 96.5685425349106 289.705627604732 482.842712674553 units box"  #E_pka=1eV
+if "${epka}==5" then &
+"velocity        pka set 215.93382559614 647.801476788419 1079.6691279807 units box"  #E_pka=5eV
+if "${epka}==10" then &
+"velocity        pka set 305.376544733167 916.129634199503 1526.88272366584 units box"  #E_pka=10eV
+if "${epka}==20" then &
+"velocity        pka set 431.8676512 1295.602954 2159.338256 units box"  #E_pka=20ev
+if "${epka}==40" then &
+"velocity        pka set 610.753089467 1832.2592684 3053.7654473 units box"  #E_pka=40ev
+
+#velocity        all create 300 314874
+
+pair_style       eam/alloyZBL
+pair_coeff       * * /public3/home/sc70551/simulations/irradiation/potentials/NiCoCr.lammps.eam.082617 Ni Co Cr
+
+neighbor         2.0 bin 
+neigh_modify     delay 10 check yes
+
+timestep        0.002
+reset_timestep  0
+
+#Reset the timestep size every N steps, useful when running an impact simulation (with damage cascade)
+variable        em equal 0.025*v_epka*1000 #eV, 2.5%, maximum ke change allowed for an atom in one timestep
+fix             5 all dt/reset 10 1.0e-7 0.002 0.1 emax ${em} units box  #min/max dt allowed (ps), max dist allowed (\AA)
+
+#energy is in the unit eV
+compute         kin all ke/atom
+compute         pot all pe/atom
+
+variable        nall equal count(all)
+variable        ke1 equal ke/v_nall
+variable        pe1 equal pe/v_nall
+
+#fix the volume of the boundary layer with certain thickness, which will decide how fast the sample cools down
+variable        dwall equal 6 #\AA =>4 atomic layers
+variable        x1 equal xlo+${dwall}
+variable        x2 equal xhi-${dwall}
+variable        y1 equal ylo+${dwall}
+variable        y2 equal yhi-${dwall}
+variable        z1 equal zlo+${dwall}
+variable        z2 equal zhi-${dwall}
+
+region          int block ${x1} ${x2} ${y1} ${y2} ${z1} ${z2} units box  #bounds of block in all dimensions
+region          surf1 block INF ${x1} INF INF INF INF units box
+group           interior region int #define the interior
+group           boundary subtract all interior #define the surface
+
+compute         tempint all temp/region int
+compute         tempsurf all temp/region surf1
+
+thermo          10
+thermo_style    custom step time temp c_tempint c_tempsurf v_ke1 v_pe1 etotal press lx
+
+variable         f file log.times  #allow dumping configs on log timescale
+variable         s equal next(f)
+shell mkdir     ./configs-${direction}
+dump             5 all custom 500 ./configs-${direction}/configuration.* id type x y z c_kin
+dump_modify      5 sort id pad 8 every v_s first yes
+
+#use different ensemble for the surf and interior regions of the sample
+fix             1 boundary nvt temp 300 300 0.2
+fix             2 interior nve
+fix             es all electron/stopping 10.0 elstop-table.dat region int
+run             90000 #depend on the PKA energy
+unfix           es
+unfix           2
+unfix           1
+
+write_data      final.data
+
+print "all done!"
+
